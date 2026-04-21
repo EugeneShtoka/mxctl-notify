@@ -1,0 +1,13 @@
+# Binary
+mxctl-notify
+
+# Go build cache
+*.test
+*.out
+
+# Environment / editor
+*.swp
+*.swo
+
+# Claude Code
+.claude/
