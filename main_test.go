@@ -226,6 +226,30 @@ func TestBuildNotification_SenderRule_MatchByDisplayName(t *testing.T) {
 	}
 }
 
+func TestBuildNotification_Title_EmptyRoomName_NoDot(t *testing.T) {
+	evt := &Event{Body: "hi", Sender: "@alice:example.com", SenderName: "Alice", RoomName: ""}
+	title, _, _ := build(evt, &Config{}, 0, false, false, false)
+	if title != "Alice" {
+		t.Errorf("expected no dot when room name empty, got: %q", title)
+	}
+}
+
+func TestBuildNotification_Title_RoomEqualssender_ShowOnce(t *testing.T) {
+	evt := &Event{Body: "hi", Sender: "@general:example.com", SenderName: "General", RoomName: "General"}
+	title, _, _ := build(evt, &Config{}, 0, false, false, false)
+	if title != "General" {
+		t.Errorf("expected single name when room equals sender, got: %q", title)
+	}
+}
+
+func TestBuildNotification_Title_EmptySender_NoDot(t *testing.T) {
+	evt := &Event{Body: "hi", Sender: "", SenderName: "", RoomName: "General"}
+	title, _, _ := build(evt, &Config{}, 0, false, false, false)
+	if title != "General" {
+		t.Errorf("expected no dot when sender fields empty, got: %q", title)
+	}
+}
+
 func TestBuildNotification_RoomAndSenderRule_BothHideTitle(t *testing.T) {
 	cfg := &Config{
 		HiddenRooms:   []RoomRule{{Room: "General", HideTitle: true}},

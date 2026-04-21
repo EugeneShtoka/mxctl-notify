@@ -255,7 +255,9 @@ func buildNotification(evt *Event, cfg *Config, maxBodyLen int, hideBody, hideRo
 			}
 			display = s
 		}
-		titleParts = append(titleParts, display)
+		if display != "" && display != evt.RoomName {
+			titleParts = append(titleParts, display)
+		}
 	}
 	title = strings.Join(titleParts, " · ")
 	if title == "" {
