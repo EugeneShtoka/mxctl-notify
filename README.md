@@ -1,6 +1,6 @@
 # mxctl-notify
 
-Desktop notification plugin for [mxctl](https://github.com/tulir/mxctl), the Matrix CLI client. Sends `notify-send` notifications for incoming messages and also works as a standalone notification tool.
+Desktop notification plugin for [mxctl](https://github.com/EugeneShtoka/mxctl), the Matrix CLI client. Sends `notify-send` notifications for incoming messages and also works as a standalone notification tool.
 
 ## Requirements
 
@@ -19,14 +19,35 @@ go build -o mxctl-notify .
 
 ### Plugin mode (via mxctl)
 
-Register it as a plugin in your mxctl config:
+Register as a pipe in your mxctl config:
 
-```yaml
-plugins:
-  - command: mxctl-notify
+```json
+{
+  "name": "notify",
+  "pipes": [
+    {
+      "cmd": "mxctl-filter",
+      "config": {
+        "exclude_self": true,
+        "self_ids": ["@me:matrix.example.com"]
+      }
+    },
+    {
+      "cmd": "mxctl-notify",
+      "config": {
+        "hide_body": false,
+        "hide_room": false
+      }
+    }
+  ]
+}
 ```
 
-mxctl will pipe JSON event envelopes to stdin. `mxctl-notify` reads an `init` message to load config (self IDs, excluded senders, exclude-self flag) and fires a desktop notification for each subsequent message event.
+mxctl invokes `mxctl-notify` once per event, passing the accumulated event JSON on stdin, `--event` with the original event, and `--config` with plugin-specific settings. `mxctl-notify` reads `body`, `sender_name`, and `room_name` from stdin, fires a desktop notification, and exits 0.
+
+`--config` and `--event` must always be provided together and are mutually exclusive with all other flags and positional arguments.
+
+Filtering (excluding self, specific senders or rooms by Matrix ID) is handled upstream by [mxctl-filter](https://github.com/EugeneShtoka/mxctl-filter) — `mxctl-notify` always notifies when invoked.
 
 ### Standalone mode
 
@@ -45,56 +66,16 @@ echo "Body text" | mxctl-notify
 
 ## Configuration
 
-### Flags
+Configuration is passed by mxctl as `--config '{"key":"value"}'` in plugin mode.
 
-| Flag             | Default | Description                                                     |
-|------------------|---------|-----------------------------------------------------------------|
-| `--max-body-len` | 0       | Truncate message bodies to this many characters. 0 = unbounded. |
-| `--hide-body`    | false   | Omit the message body; show only the title.                     |
-| `--hide-room`    | false   | Omit the room name from the notification title.                 |
-| `--hide-sender`  | false   | Omit the sender name from the notification title.               |
+| Field          | Type   | Default | Description                                                      |
+|----------------|--------|---------|------------------------------------------------------------------|
+| `max_body_len` | `int`  | `0`     | Truncate message bodies to this many characters. 0 = unbounded. |
+| `hide_body`    | `bool` | `false` | Omit the message body; show only the title.                      |
+| `hide_room`    | `bool` | `false` | Omit the room name from the notification title.                  |
+| `hide_sender`  | `bool` | `false` | Omit the sender name from the notification title.                |
 
 If both room and sender are hidden the title falls back to `New message`.
-
-### mxctl init config (plugin mode)
-
-mxctl passes the following fields in the `init` envelope:
-
-| Field              | Type       | Description                                                     |
-|--------------------|------------|-----------------------------------------------------------------|
-| `self_ids`         | `[]string` | Your own Matrix user IDs                                        |
-| `excluded_senders` | `[]string` | Sender IDs to suppress notifications for                        |
-| `exclude_self`     | `bool`     | Skip notifications for your own messages                        |
-| `max_body_len`     | `int`      | Truncate message bodies to this many characters. 0 = unbounded. |
-| `hide_body`        | `bool`     | Omit the message body; show only the title.                     |
-| `hide_room`        | `bool`     | Omit the room name from the notification title.                 |
-| `hide_sender`      | `bool`     | Omit the sender name from the notification title.               |
-
-Each option can be set via its flag **or** its mxctl config field, but not both — an error is thrown if both sources provide a value.
-
-### Per-room and per-sender rules (plugin mode)
-
-For granular control, `hidden_rooms` and `hidden_senders` accept a list of rules. Each rule targets a specific room or sender and can independently hide the title contribution and/or the message body. If either flag is true on a matching rule, the body is hidden.
-
-```yaml
-# mxctl plugin config
-hidden_rooms:
-  - room: "!roomid:example.com"   # matches room ID or room name
-    hide_title: true               # omits room from notification title; also hides body
-    hide_content: true             # omits message body
-
-hidden_senders:
-  - sender: "@bot:example.com"    # matches Matrix ID or display name
-    hide_title: false
-    hide_content: true
-```
-
-| Field          | Type     | Description                                                                 |
-|----------------|----------|-----------------------------------------------------------------------------|
-| `room`         | `string` | Room ID (`!id:server`) or room name to match                                |
-| `sender`       | `string` | Matrix ID (`@user:server`) or display name to match                         |
-| `hide_title`   | `bool`   | Omit room/sender from the notification title; also suppresses the body      |
-| `hide_content` | `bool`   | Omit the message body                                                       |
 
 ## License
 

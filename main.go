@@ -5,48 +5,22 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
 )
 
-// RoomRule configures notification behaviour for a specific room.
-type RoomRule struct {
-	// Room matches against the event's room ID or room name.
-	Room        string `json:"room"`
-	HideTitle   bool   `json:"hide_title"`
-	HideContent bool   `json:"hide_content"`
-}
-
-// SenderRule configures notification behaviour for a specific sender.
-type SenderRule struct {
-	// Sender matches against the event's sender Matrix ID or display name.
-	Sender      string `json:"sender"`
-	HideTitle   bool   `json:"hide_title"`
-	HideContent bool   `json:"hide_content"`
-}
-
-// Config is received from mxctl in the init message.
+// Config is received from mxctl via --config.
 type Config struct {
-	SelfIDs         []string `json:"self_ids"`
-	ExcludedSenders []string `json:"excluded_senders"`
-	ExcludeSelf     bool     `json:"exclude_self"`
 	// MaxBodyLen truncates message bodies to this many runes. 0 means unbounded.
-	MaxBodyLen    int          `json:"max_body_len"`
-	HideBody      bool         `json:"hide_body"`
-	HideRoom      bool         `json:"hide_room"`
-	HideSender    bool         `json:"hide_sender"`
-	HiddenRooms   []RoomRule   `json:"hidden_rooms"`
-	HiddenSenders []SenderRule `json:"hidden_senders"`
+	MaxBodyLen int  `json:"max_body_len"`
+	HideBody   bool `json:"hide_body"`
+	HideRoom   bool `json:"hide_room"`
+	HideSender bool `json:"hide_sender"`
 }
 
-type envelope struct {
-	Version int             `json:"version"`
-	Type    string          `json:"type"`
-	Config  json.RawMessage `json:"config"`
-	Data    json.RawMessage `json:"data"`
-}
-
+// Event is the accumulated event payload received on stdin.
 type Event struct {
 	EventID    string `json:"event_id"`
 	RoomID     string `json:"room_id"`
@@ -58,188 +32,115 @@ type Event struct {
 	TS         int64  `json:"ts"`
 }
 
-type flags struct {
-	maxBodyLen int
-	hideBody   bool
-	hideRoom   bool
-	hideSender bool
-}
-
 func main() {
-	var f flags
-	flag.IntVar(&f.maxBodyLen, "max-body-len", 0, "truncate message bodies to this many characters (default: unbounded)")
-	flag.BoolVar(&f.hideBody, "hide-body", false, "omit message body from notifications")
-	flag.BoolVar(&f.hideRoom, "hide-room", false, "omit room name from the notification title")
-	flag.BoolVar(&f.hideSender, "hide-sender", false, "omit sender name from the notification title")
+	configJSON := flag.String("config", "", "JSON config object (mxctl pipe mode); must be paired with --event")
+	eventFlag := flag.String("event", "", "original Matrix event JSON (mxctl pipe mode); must be paired with --config")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, `Usage: mxctl-notify [flags] [title [body]]
+		fmt.Fprintf(os.Stderr, `Usage: mxctl-notify [title [body]]
 
 mxctl-notify sends desktop notifications via notify-send.
 
 It operates in two modes:
 
-  Plugin mode (no arguments):
-    Reads JSON event envelopes from mxctl on stdin and fires a desktop
-    notification for each incoming message. Configuration is received in
-    the init envelope from mxctl. Each flag below has a corresponding
-    mxctl config field; set it via one source only — an error is thrown
-    if both are provided.
+  Plugin mode (invoked by mxctl):
+    Activated by --config and --event together. Reads the accumulated event
+    JSON from stdin and fires a desktop notification. These two flags are
+    mutually exclusive with all other flags and positional arguments.
+    stdin must be valid JSON.
 
   Standalone mode:
     mxctl-notify "Title" "Body"          — notify with explicit title and body
     echo "Body" | mxctl-notify "Title"   — body from stdin
     echo "Body" | mxctl-notify           — title defaults to 'mxctl-notify'
 
-Flags:
+Plugin flags:
+  --config  JSON config object (must be paired with --event)
+  --event   Original Matrix event JSON (must be paired with --config)
+
+Config fields:
+  max_body_len  int   Truncate body to this many characters (0 = unbounded)
+  hide_body     bool  Omit message body from the notification
+  hide_room     bool  Omit room name from the notification title
+  hide_sender   bool  Omit sender name from the notification title
 `)
-		flag.PrintDefaults()
 	}
 	flag.Parse()
 	args := flag.Args()
 
-	// Standalone mode: mxctl-notify [title] [body]
-	switch len(args) {
-	case 2:
-		notify(args[0], args[1])
-		return
-	case 1:
-		body := readAll(os.Stdin)
-		notify(args[0], body)
-		return
-	case 0:
-		// fall through to plugin / piped-stdin mode
-	default:
-		fmt.Fprintf(os.Stderr, "mxctl-notify: too many arguments\n\n")
+	configSet := *configJSON != ""
+	eventSet := *eventFlag != ""
+
+	if configSet != eventSet {
+		fmt.Fprintf(os.Stderr, "mxctl-notify: --config and --event must be used together\n\n")
 		flag.Usage()
-		os.Exit(2)
+		os.Exit(1)
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
-	if !scanner.Scan() {
-		return
-	}
-	firstLine := scanner.Text()
-
-	// Plugin mode: first line is a versioned JSON envelope from mxctl.
-	if strings.HasPrefix(firstLine, `{"version"`) {
-		var cfg Config
-		handleLine(firstLine, &cfg, f)
-		for scanner.Scan() {
-			handleLine(scanner.Text(), &cfg, f)
-		}
-		return
-	}
-
-	// Standalone mode: plain text piped in.
-	lines := []string{firstLine}
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	notify("mxctl-notify", strings.Join(lines, "\n"))
-}
-
-func handleLine(line string, cfg *Config, f flags) {
-	var env envelope
-	if err := json.Unmarshal([]byte(line), &env); err != nil {
-		fmt.Fprintf(os.Stderr, "mxctl-notify: parse: %v\n", err)
-		return
-	}
-
-	switch env.Type {
-	case "init":
-		if env.Config != nil {
-			if err := json.Unmarshal(env.Config, cfg); err != nil {
-				fmt.Fprintf(os.Stderr, "mxctl-notify: parse config: %v\n", err)
-				return
+	if configSet {
+		// Plugin mode — no other flags or positional args allowed.
+		var otherFlags bool
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name != "config" && f.Name != "event" {
+				otherFlags = true
 			}
+		})
+		if otherFlags {
+			fmt.Fprintf(os.Stderr, "mxctl-notify: --config and --event are mutually exclusive with all other flags\n\n")
+			flag.Usage()
+			os.Exit(1)
 		}
-		var conflicts []string
-		if cfg.MaxBodyLen != 0 && f.maxBodyLen != 0 {
-			conflicts = append(conflicts, "max_body_len / --max-body-len")
-		}
-		if cfg.HideBody && f.hideBody {
-			conflicts = append(conflicts, "hide_body / --hide-body")
-		}
-		if cfg.HideRoom && f.hideRoom {
-			conflicts = append(conflicts, "hide_room / --hide-room")
-		}
-		if cfg.HideSender && f.hideSender {
-			conflicts = append(conflicts, "hide_sender / --hide-sender")
-		}
-		if len(conflicts) > 0 {
-			fmt.Fprintf(os.Stderr, "mxctl-notify: set via flag and mxctl config, use only one: %s\n", strings.Join(conflicts, ", "))
+		if len(args) > 0 {
+			fmt.Fprintf(os.Stderr, "mxctl-notify: positional arguments not allowed in plugin mode\n\n")
+			flag.Usage()
 			os.Exit(1)
 		}
 
-	case "event":
-		var evt Event
-		if err := json.Unmarshal(env.Data, &evt); err != nil {
-			fmt.Fprintf(os.Stderr, "mxctl-notify: parse event: %v\n", err)
-			return
+		var cfg Config
+		if err := json.Unmarshal([]byte(*configJSON), &cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "mxctl-notify: parse config: %v\n", err)
+			os.Exit(1)
 		}
-		handleEvent(&evt, cfg, f)
+
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mxctl-notify: read stdin: %v\n", err)
+			os.Exit(1)
+		}
+		var evt Event
+		if err := json.Unmarshal(data, &evt); err != nil {
+			fmt.Fprintf(os.Stderr, "mxctl-notify: parse event: %v\n", err)
+			os.Exit(1)
+		}
+		handleEvent(&evt, cfg)
+		return
+	}
+
+	// Standalone mode.
+	switch len(args) {
+	case 2:
+		notify(args[0], args[1])
+	case 1:
+		notify(args[0], readAll(os.Stdin))
+	case 0:
+		notify("mxctl-notify", readAll(os.Stdin))
+	default:
+		fmt.Fprintf(os.Stderr, "mxctl-notify: too many arguments\n\n")
+		flag.Usage()
+		os.Exit(1)
 	}
 }
 
-func handleEvent(evt *Event, cfg *Config, f flags) {
-	maxBodyLen := cfg.MaxBodyLen
-	if maxBodyLen == 0 {
-		maxBodyLen = f.maxBodyLen
-	}
-	hideBody := cfg.HideBody || f.hideBody
-	hideRoom := cfg.HideRoom || f.hideRoom
-	hideSender := cfg.HideSender || f.hideSender
-
-	title, body, skip := buildNotification(evt, cfg, maxBodyLen, hideBody, hideRoom, hideSender)
+func handleEvent(evt *Event, cfg Config) {
+	title, body, skip := buildNotification(evt, cfg.MaxBodyLen, cfg.HideBody, cfg.HideRoom, cfg.HideSender)
 	if skip {
 		return
 	}
 	notify(title, body)
 }
 
-func buildNotification(evt *Event, cfg *Config, maxBodyLen int, hideBody, hideRoom, hideSender bool) (title, body string, skip bool) {
+func buildNotification(evt *Event, maxBodyLen int, hideBody, hideRoom, hideSender bool) (title, body string, skip bool) {
 	if evt.Body == "" {
 		return "", "", true
-	}
-
-	if cfg.ExcludeSelf {
-		for _, id := range cfg.SelfIDs {
-			if evt.Sender == id {
-				return "", "", true
-			}
-		}
-	}
-
-	for _, id := range cfg.ExcludedSenders {
-		if evt.Sender == id {
-			return "", "", true
-		}
-	}
-
-	// Apply per-room rules.
-	for _, rule := range cfg.HiddenRooms {
-		if rule.Room == evt.RoomID || rule.Room == evt.RoomName {
-			if rule.HideTitle {
-				hideRoom = true
-			}
-			if rule.HideTitle || rule.HideContent {
-				hideBody = true
-			}
-			break
-		}
-	}
-
-	// Apply per-sender rules.
-	for _, rule := range cfg.HiddenSenders {
-		if rule.Sender == evt.Sender || rule.Sender == evt.SenderName {
-			if rule.HideTitle {
-				hideSender = true
-			}
-			if rule.HideTitle || rule.HideContent {
-				hideBody = true
-			}
-			break
-		}
 	}
 
 	var titleParts []string
